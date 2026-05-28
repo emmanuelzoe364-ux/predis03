@@ -1,7 +1,6 @@
 streamlit
 yfinance
 pandas
-numpy<2.0.0
+numpy
 plotly
 requests
-https://github.com/twopirllc/pandas-ta/archive/refs/heads/main.zip
