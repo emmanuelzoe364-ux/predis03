@@ -22,107 +22,123 @@ with st.sidebar:
     ema_slow_val = st.number_input("Slow EMA", value=72)
     z_win_val = st.number_input("Z-Score Window", value=20)
 
-    if st.button("🔄 Refresh Data"):
+    st.divider()
+    st.subheader("Data Status")
+    status_box = st.empty()
+
+    if st.button("🔄 Force Refresh"):
         st.cache_data.clear()
         st.rerun()
 
-st.title(f"⚖️ Revelation Engine: {ticker}")
-
-# --- DATA FETCHING ---
-@st.cache_data(ttl=600)
-def fetch_all_data(main_t, tf, prd):
+# --- ROBUST DATA ENGINE ---
+@st.cache_data(ttl=300)
+def fetch_and_align(main_t, tf, prd):
     try:
-        m_df = yf.download(main_t, period=prd, interval=tf, auto_adjust=True, progress=False)
-        p_df = yf.download("PAXG-USD", period=prd, interval=tf, auto_adjust=True, progress=False)
-        b_df = yf.download("BTC-USD", period=prd, interval=tf, auto_adjust=True, progress=False)
-        e_df = yf.download("ETH-USD", period=prd, interval=tf, auto_adjust=True, progress=False)
+        # Fetch tickers
+        assets = {
+            "Main": main_t,
+            "PAXG": "PAXG-USD",
+            "BTC": "BTC-USD",
+            "ETH": "ETH-USD"
+        }
         
-        if m_df.empty: return None, None, None, "No Data"
-
-        for d in [m_df, p_df, b_df, e_df]:
-            if not d.empty and isinstance(d.columns, pd.MultiIndex):
+        data_frames = {}
+        for key, sym in assets.items():
+            d = yf.download(sym, period=prd, interval=tf, auto_adjust=True, progress=False)
+            if d.empty:
+                return None, f"Failed to fetch {sym}. Yahoo may be rate-limiting. Try 1h timeframe."
+            
+            # Flatten MultiIndex if necessary
+            if isinstance(d.columns, pd.MultiIndex):
                 d.columns = d.columns.get_level_values(0)
+            data_frames[key] = d
 
-        idx = m_df.index
-        p_c = p_df['Close'].reindex(idx).ffill().bfill()
-        b_c = b_df['Close'].reindex(idx).ffill().bfill()
-        e_c = e_df['Close'].reindex(idx).ffill().bfill()
+        # Standardize and Concatenate (The Fix for the loading issue)
+        # We align all data by the 'Main' ticker's time index
+        main_df = data_frames["Main"].copy()
+        main_df['PAXG_C'] = data_frames["PAXG"]['Close'].reindex(main_df.index).ffill().bfill()
+        main_df['BTC_C'] = data_frames["BTC"]['Close'].reindex(main_df.index).ffill().bfill()
+        main_df['ETH_C'] = data_frames["ETH"]['Close'].reindex(main_df.index).ffill().bfill()
 
-        return m_df, (p_c/b_c), (b_c/e_c), None
+        return main_df, None
     except Exception as e:
-        return None, None, None, str(e)
+        return None, str(e)
 
-df, pb_ratio, be_ratio, err = fetch_all_data(ticker, timeframe, period)
+# EXECUTE
+df_raw, error_msg = fetch_and_align(ticker, timeframe, period)
 
-if err:
-    st.error(f"Error: {err}")
-elif df is not None:
+if error_msg:
+    status_box.error(error_msg)
+    st.error(f"Engine Error: {error_msg}")
+elif df_raw is not None:
+    status_box.success("Connection: OK")
+    df = df_raw.copy()
+
     # --- MATH SECTION ---
-    # EMAs
+    # EMA Calculation
     df['EMA_30'] = df['Close'].ewm(span=ema_fast_val, adjust=False).mean()
     df['EMA_72'] = df['Close'].ewm(span=ema_slow_val, adjust=False).mean()
     
     # Z-Scores
     df['Spread'] = df['EMA_30'] - df['EMA_72']
     df['Z_EMA'] = (df['Spread'] - df['Spread'].rolling(z_win_val).mean()) / (df['Spread'].rolling(z_win_val).std() + 1e-9)
-    df['Z_GOLD_BTC'] = (pb_ratio - pb_ratio.rolling(z_win_val).mean()) / (pb_ratio.rolling(z_win_val).std() + 1e-9)
-    df['Z_BTC_ETH'] = (be_ratio - be_ratio.rolling(z_win_val).mean()) / (be_ratio.rolling(z_win_val).std() + 1e-9)
-
-    # --- ORIGINAL REVELATION P/D MATH ---
-    # Formula: pd = (2*C - (H+L)) / (H-L). Scale = 1.0 - pd.
-    rng_raw = (df['High'] - df['Low']) + 1e-9
-    pd_raw = (2 * df['Close'] - (df['High'] + df['Low'])) / rng_raw
-    pd_scale = 1.0 - pd_raw  # Standard 0 to 2 scale
     
-    # Directional Movement
+    ratio_pb = df['PAXG_C'] / (df['BTC_C'] + 1e-9)
+    df['Z_GOLD_BTC'] = (ratio_pb - ratio_pb.rolling(z_win_val).mean()) / (ratio_pb.rolling(z_win_val).std() + 1e-9)
+    
+    ratio_be = df['BTC_C'] / (df['ETH_C'] + 1e-9)
+    df['Z_BTC_ETH'] = (ratio_be - ratio_be.rolling(z_win_val).mean()) / (ratio_be.rolling(z_win_val).std() + 1e-9)
+
+    # Revelation Phase Logic
+    rng = (df['High'] - df['Low']) + 1e-9
+    pd_scale = 1.0 - ((2 * df['Close'] - (df['High'] + df['Low'])) / rng)
     u = df['High'] - df['High'].shift(1)
     d = df['Low'].shift(1) - df['Low']
     
-    h_vals = []
-    phases = []
+    h_vals, phases = [], []
     for up, dw, val in zip(u, d, pd_scale):
-        if up > dw and up > 0: # Premium Side
+        if up > dw and up > 0:
             phases.append("Dp" if val > 1.0 else "rP")
-            h_vals.append(val) # Positive values 0 to 2
-        elif dw > up and dw > 0: # Discount Side
+            h_vals.append(val)
+        elif dw > up and dw > 0:
             phases.append("rD" if val > 1.0 else "Ad")
-            h_vals.append(-val) # Negative values 0 to -2
+            h_vals.append(-val)
         else:
             phases.append("Neutral")
             h_vals.append(0)
-            
+    
     df['H_Val'] = h_vals
     df['Phase'] = phases
 
     # --- PLOTTING ---
     fig = make_subplots(rows=5, cols=1, shared_xaxes=True, vertical_spacing=0.02, row_heights=[0.35, 0.15, 0.15, 0.15, 0.20])
     
-    # Price
+    # Candle + EMAs
     fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['EMA_30'], line=dict(color='orange', width=1.5), name="EMA 30"), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['EMA_72'], line=dict(color='cyan', width=1.5), name="EMA 72"), row=1, col=1)
     
-    # P/D Scale (Subplot 2) - Original -2 to 2 scale
+    # P/D Scale
     c_map = {"rD":'#FF0000', "Ad":'#FFA500', "rP":'#00FF00', "Dp":'#006400', "Neutral":'gray'}
     colors = [c_map.get(p, 'gray') for p in df['Phase']]
     fig.add_trace(go.Bar(x=df.index, y=df['H_Val'], marker_color=colors, name="P/D Scale"), row=2, col=1)
-    fig.add_hline(y=1.0, line_dash="dot", line_color="white", opacity=0.3, row=2, col=1)
-    fig.add_hline(y=-1.0, line_dash="dot", line_color="white", opacity=0.3, row=2, col=1)
 
     # Z-Scores
     fig.add_trace(go.Scatter(x=df.index, y=df['Z_EMA'], line=dict(color='yellow', width=2), name="Z-EMA"), row=3, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['Z_GOLD_BTC'], line=dict(color='magenta', width=2), name="Z-Gold"), row=4, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['Z_BTC_ETH'], line=dict(color='deepskyblue', width=2), name="Z-Alts"), row=5, col=1)
 
-    # Reference lines for Z-Scores
-    for r in [3, 4, 5]:
-        fig.add_hline(y=2.0, line_dash="dash", line_color="white", row=r, col=1, opacity=0.3)
-        fig.add_hline(y=-2.0, line_dash="dash", line_color="white", row=r, col=1, opacity=0.3)
-        fig.add_hline(y=0, line_width=1, line_color="gray", row=r, col=1, opacity=0.5)
-
+    # Styling
     fig.update_layout(height=1100, template="plotly_dark", xaxis_rangeslider_visible=False, showlegend=False)
     st.plotly_chart(fig, use_container_width=True)
 
-    # --- DATA TABLE ---
-    st.subheader("📋 Data Output Table")
-    st.dataframe(df[['Close', 'EMA_30', 'EMA_72', 'H_Val', 'Z_EMA', 'Z_GOLD_BTC', 'Z_BTC_ETH', 'Phase']].sort_index(ascending=False), use_container_width=True)
+    # --- DATA TABLE (THE MASTER OUTPUT) ---
+    st.divider()
+    st.subheader("📋 Revelation Output Data")
+    
+    # Rounding and formatting for the final display
+    table_df = df[['Close', 'EMA_30', 'EMA_72', 'H_Val', 'Z_EMA', 'Z_GOLD_BTC', 'Z_BTC_ETH', 'Phase']].copy()
+    table_df = table_df.round(4)
+    
+    # Show it
+    st.dataframe(table_df.sort_index(ascending=False), use_container_width=True)
