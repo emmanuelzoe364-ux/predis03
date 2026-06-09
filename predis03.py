@@ -6,114 +6,92 @@ from plotly.subplots import make_subplots
 import requests
 import warnings
 from datetime import datetime
-import time
-import random
 
 # --- INITIAL SETTINGS ---
 warnings.filterwarnings('ignore')
-st.set_page_config(layout="wide", page_title="Revelation Engine: Cloud-Bypass")
+st.set_page_config(layout="wide", page_title="Revelation Engine: Binance Live")
 
-# --- SIDEBAR & CACHE BUSTER ---
-if 'refresh_count' not in st.session_state:
-    st.session_state.refresh_count = 0
-
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("⚙️ Configuration")
-    primary_ticker = st.text_input("Primary Ticker", value="BTC-USD").strip().upper()
-    timeframe = st.selectbox("Timeframe", ["1m", "5m", "15m", "30m", "1h", "1d"], index=0)
+    # Ticker input (Defaults to BTC)
+    primary_ticker = st.text_input("Primary Ticker (Binance Format)", value="BTCUSDT").strip().upper()
+    
+    # Binance Intervals
+    timeframe = st.selectbox("Timeframe", ["1m", "5m", "15m", "30m", "1h", "4h", "1d"], index=0)
     
     st.divider()
     ema_fast_val = st.number_input("Fast EMA", value=30)
     ema_slow_val = st.number_input("Slow EMA", value=72)
     z_win_val = st.number_input("Z-Score Window", value=20)
 
-    if st.button("🔥 FORCE LIVE SYNC"):
+    if st.button("🔄 REFRESH LIVE DATA"):
         st.cache_data.clear()
-        st.session_state.refresh_count += 1
         st.rerun()
 
-    st.write(f"Cloud Status: **Syncing...**")
-    st.write(f"Last Refresh: {datetime.now().strftime('%H:%M:%S')} UTC")
+st.title(f"⚖️ Revelation Engine: {primary_ticker}")
+st.caption("Source: Binance Real-Time API | No Throttling | Cloud Optimized")
 
-# --- DIRECT API FETCH ENGINE (Bypasses yfinance) ---
-def fetch_direct_api(ticker, interval):
-    """Fetches data directly from Yahoo Query API with a cache-busting timestamp."""
+# --- BINANCE DATA ENGINE ---
+@st.cache_data(ttl=5) # 5 second cache for true live feel
+def fetch_binance_data(symbol, interval):
     try:
-        # Range logic based on interval
-        range_str = "1d" if interval in ["1m", "5m"] else "7d"
-        # Cache Buster: Random digit to trick the cloud proxy
-        cb = random.randint(1000, 9999)
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval={interval}&range={range_str}&cache_buster={cb}"
+        url = "https://api.binance.com/api/v3/klines"
+        params = {"symbol": symbol, "interval": interval, "limit": 500}
+        res = requests.get(url, params=params, timeout=10)
+        data = res.json()
         
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        }
+        df = pd.DataFrame(data, columns=[
+            'timestamp', 'Open', 'High', 'Low', 'Close', 'Volume',
+            'close_time', 'quote_av', 'trades', 'tb_base_av', 'tb_quote_av', 'ignore'
+        ])
         
-        response = requests.get(url, headers=headers, timeout=10)
-        json_data = response.json()
+        df['Date'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('Date', inplace=True)
         
-        # Parsing JSON structure
-        result = json_data['chart']['result'][0]
-        timestamps = result['timestamp']
-        ohlc = result['indicators']['quote'][0]
-        adj_close = result['indicators']['adjclose'][0]['adjclose']
-        
-        df = pd.DataFrame({
-            'Open': ohlc['open'],
-            'High': ohlc['high'],
-            'Low': ohlc['low'],
-            'Close': adj_close
-        }, index=pd.to_datetime(timestamps, unit='s'))
-        
-        return df.ffill()
+        cols = ['Open', 'High', 'Low', 'Close']
+        df[cols] = df[cols].astype(float)
+        return df[cols]
     except:
         return None
 
-@st.cache_data(ttl=10)
-def fetch_all_layers_direct(main_t, tf, refresh_id):
-    # Fetch all 4 assets directly
-    m_df = fetch_direct_api(main_t, tf)
-    paxg = fetch_direct_api("PAXG-USD", tf)
-    btc = fetch_direct_api("BTC-USD", tf)
-    eth = fetch_direct_api("ETH-USD", tf)
-    
-    if m_df is None:
-        return None, None, None, "API connection failed. Yahoo is throttling this cloud server."
-        
-    idx = m_df.index
-    def align(source_df):
-        if source_df is not None:
-            return source_df['Close'].reindex(idx).ffill().bfill()
-        return pd.Series(np.nan, index=idx)
-    
-    p_c = align(paxg)
-    b_c = align(btc)
-    e_c = align(eth)
-    
-    return m_df, (p_c/(b_c+1e-9)), (b_c/(e_c+1e-9)), None
+# Fetch all 3 layers from Binance
+main_df = fetch_binance_data(primary_ticker, timeframe)
+paxg_df = fetch_binance_data("PAXGUSDT", timeframe)
+eth_df = fetch_binance_data("ETHUSDT", timeframe)
+btc_ref = fetch_binance_data("BTCUSDT", timeframe)
 
-# Execute
-df, pb_ratio, be_ratio, err = fetch_all_layers_direct(primary_ticker, timeframe, st.session_state.refresh_count)
+if main_df is None or paxg_df is None:
+    st.error("📡 API Connection Error. Please ensure the ticker symbols are correct Binance pairs (e.g., BTCUSDT).")
+else:
+    # --- ALIGNMENT ---
+    idx = main_df.index
+    p_c = paxg_df['Close'].reindex(idx).ffill().bfill()
+    b_c = btc_ref['Close'].reindex(idx).ffill().bfill()
+    e_c = eth_df['Close'].reindex(idx).ffill().bfill()
+    
+    pb_ratio = p_c / (b_c + 1e-9)
+    be_ratio = b_c / (e_c + 1e-9)
 
-if err:
-    st.error(err)
-elif df is not None:
-    # --- MATH SECTION (Native) ---
-    df['EMA_30'] = df['Close'].ewm(span=ema_fast_val, adjust=False).mean()
-    df['EMA_72'] = df['Close'].ewm(span=ema_slow_val, adjust=False).mean()
-    df['Spread'] = df['EMA_30'] - df['EMA_72']
-    df['Z_EMA'] = (df['Spread'] - df['Spread'].rolling(z_win_val).mean()) / (df['Spread'].rolling(z_win_val).std() + 1e-9)
-
+    # --- MATH SECTION ---
+    # Native EMAs
+    main_df['EMA_30'] = main_df['Close'].ewm(span=ema_fast_val, adjust=False).mean()
+    main_df['EMA_72'] = main_df['Close'].ewm(span=ema_slow_val, adjust=False).mean()
+    
+    # Z-Scores
+    main_df['Spread'] = main_df['EMA_30'] - main_df['EMA_72']
+    main_df['Z_EMA'] = (main_df['Spread'] - main_df['Spread'].rolling(z_win_val).mean()) / (main_df['Spread'].rolling(z_win_val).std() + 1e-9)
+    
     def get_z(ser, win):
         return (ser - ser.rolling(win).mean()) / (ser.rolling(win).std() + 1e-9)
     
-    df['Z_GOLD_BTC'] = get_z(pb_ratio, z_win_val)
-    df['Z_BTC_ETH'] = get_z(be_ratio, z_win_val)
+    main_df['Z_GOLD_BTC'] = get_z(pb_ratio, z_win_val)
+    main_df['Z_BTC_ETH'] = get_z(be_ratio, z_win_val)
 
-    # --- REVELATION PHASE LOGIC (-2 to 2) ---
-    rng = (df['High'] - df['Low']) + 1e-9
-    pd_v = 1.0 - ((2 * df['Close'] - (df['High'] + df['Low'])) / rng)
-    u, d = (df['High'] - df['High'].shift(1)), (df['Low'].shift(1) - df['Low'])
+    # --- ORIGINAL REVELATION P/D (-2 to 2) ---
+    rng = (main_df['High'] - main_df['Low']) + 1e-9
+    pd_v = 1.0 - ((2 * main_df['Close'] - (main_df['High'] + main_df['Low'])) / rng)
+    u, d = (main_df['High'] - main_df['High'].shift(1)), (main_df['Low'].shift(1) - main_df['Low'])
     
     h_vals, phases = [], []
     for up, dw, val in zip(u, d, pd_v):
@@ -123,33 +101,31 @@ elif df is not None:
             phases.append("rD" if val > 1.0 else "Ad"); h_vals.append(-val)
         else:
             phases.append("Neutral"); h_vals.append(0)
-    df['H_Val'], df['Phase'] = h_vals, phases
+    main_df['H_Val'], main_df['Phase'] = h_vals, phases
 
     # --- VISUALIZATION ---
-    st.title(f"⚖️ {primary_ticker} Revelation")
-    
-    # Show the latest candle time as a big metric to confirm it is live
-    last_ts = df.index[-1].strftime('%H:%M:%S')
-    st.metric("Latest Data Timestamp (UTC)", last_ts)
+    # Latest Sync Display
+    last_ts = main_df.index[-1].strftime('%H:%M:%S')
+    st.metric("Latest Binance Candle (UTC)", last_ts)
 
     fig = make_subplots(rows=5, cols=1, shared_xaxes=True, vertical_spacing=0.02, 
                         row_heights=[0.35, 0.15, 0.15, 0.15, 0.20])
 
-    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['EMA_30'], line=dict(color='orange', width=1.5), name="EMA 30"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['EMA_72'], line=dict(color='cyan', width=1.5), name="EMA 72"), row=1, col=1)
+    fig.add_trace(go.Candlestick(x=main_df.index, open=main_df['Open'], high=main_df['High'], low=main_df['Low'], close=main_df['Close'], name="Price"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=main_df.index, y=main_df['EMA_30'], line=dict(color='orange', width=1.5), name="EMA 30"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=main_df.index, y=main_df['EMA_72'], line=dict(color='cyan', width=1.5), name="EMA 72"), row=1, col=1)
 
     c_map = {"rD":'red', "Ad":'orange', "rP":'lime', "Dp":'green', "Neutral":'gray'}
-    fig.add_trace(go.Bar(x=df.index, y=df['H_Val'], marker_color=[c_map.get(p, 'gray') for p in df['Phase']], name="P/D"), row=2, col=1)
+    fig.add_trace(go.Bar(x=main_df.index, y=main_df['H_Val'], marker_color=[c_map.get(p, 'gray') for p in main_df['Phase']]), row=2, col=1)
 
-    fig.add_trace(go.Scatter(x=df.index, y=df['Z_EMA'], line=dict(color='yellow'), name="Z-EMA"), row=3, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['Z_GOLD_BTC'], line=dict(color='magenta'), name="Z-Gold"), row=4, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['Z_BTC_ETH'], line=dict(color='deepskyblue'), name="Z-Alts"), row=5, col=1)
+    fig.add_trace(go.Scatter(x=main_df.index, y=main_df['Z_EMA'], line=dict(color='yellow'), name="Z-EMA"), row=3, col=1)
+    fig.add_trace(go.Scatter(x=main_df.index, y=main_df['Z_GOLD_BTC'], line=dict(color='magenta'), name="Z-Gold"), row=4, col=1)
+    fig.add_trace(go.Scatter(x=main_df.index, y=main_df['Z_BTC_ETH'], line=dict(color='deepskyblue'), name="Z-Alts"), row=5, col=1)
 
     fig.update_layout(height=1100, template="plotly_dark", xaxis_rangeslider_visible=False, showlegend=False)
     st.plotly_chart(fig, use_container_width=True)
 
-    # --- TABLE (EMAs included) ---
-    st.subheader("📋 Output Data Table")
+    # --- DATA TABLE ---
+    st.subheader("📋 Output Data Table (Real-Time)")
     cols = ['Close', 'EMA_30', 'EMA_72', 'H_Val', 'Z_EMA', 'Z_GOLD_BTC', 'Z_BTC_ETH', 'Phase']
-    st.dataframe(df[cols].sort_index(ascending=False).head(50), use_container_width=True)
+    st.dataframe(main_df[cols].sort_index(ascending=False).head(50), use_container_width=True)
