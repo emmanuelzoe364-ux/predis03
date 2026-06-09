@@ -6,18 +6,18 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import warnings
 from datetime import datetime
-import requests
+import time
 
 # --- INITIAL SETTINGS ---
 warnings.filterwarnings('ignore')
-st.set_page_config(layout="wide", page_title="Revelation Engine Pro")
+st.set_page_config(layout="wide", page_title="Revelation Engine: Deep-Sync")
 
 # --- SIDEBAR & CACHE BUSTER ---
 if 'refresh_count' not in st.session_state:
     st.session_state.refresh_count = 0
 
 with st.sidebar:
-    st.header("🚀 Turbo Control")
+    st.header("⚙️ Configuration")
     primary_ticker = st.text_input("Primary Ticker", value="BTC-USD").strip().upper()
     timeframe = st.selectbox("Timeframe", ["1m", "5m", "15m", "30m", "1h"], index=0)
     period = st.selectbox("Period", ["1d", "3d", "7d"], index=0)
@@ -27,93 +27,93 @@ with st.sidebar:
     ema_slow_val = st.number_input("Slow EMA", value=72)
     z_win_val = st.number_input("Z-Score Window", value=20)
 
-    if st.button("🔥 FORCE LIVE REFRESH"):
+    if st.button("🔥 FORCE DEEP SYNC"):
         st.cache_data.clear()
         st.session_state.refresh_count += 1
         st.rerun()
 
-# --- HIGH-PRIORITY DATA ENGINE ---
-@st.cache_data(ttl=15)
-def fetch_turbo_data(main_t, tf, prd, refresh_id):
+    st.divider()
+    st.subheader("📡 Live Status Console")
+    status_box = st.empty()
+
+# --- ROBUST INDIVIDUAL FETCH ENGINE ---
+def get_asset_data(ticker_str, tf, prd):
+    """Uses .history() for better cookie handling on cloud servers."""
     try:
-        # Browser Spoofing to prevent Cloud Throttling
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-        }
-        session = requests.Session()
-        session.headers.update(headers)
+        t_obj = yf.Ticker(ticker_str)
+        # Fetching with prepost=True to get the absolute latest forming candle
+        data = t_obj.history(period=prd, interval=tf, auto_adjust=True, prepost=True)
+        if data.empty:
+            return None
+        return data[['Close', 'High', 'Low']]
+    except:
+        return None
 
-        tickers = [main_t, "PAXG-USD", "BTC-USD", "ETH-USD"]
-        
-        # KEY FIX: Removed 'proxy' keyword. Using session only.
-        data = yf.download(
-            tickers=tickers,
-            period=prd,
-            interval=tf,
-            auto_adjust=True,
-            prepost=True,
-            session=session, 
-            threads=False,
-            progress=False,
-            group_by='ticker'
-        )
-        
-        if data.empty: 
-            return None, None, None, "Yahoo returned no data. Try refreshing in 30 seconds."
+@st.cache_data(ttl=15)
+def fetch_all_layers(main_t, tf, prd, refresh_id):
+    # 1. Fetch Primary
+    m_df = get_asset_data(main_t, tf, prd)
+    if m_df is None:
+        return None, None, None, f"Failed to fetch {main_t}"
+    
+    # 2. Fetch Comparison Assets
+    p_df = get_asset_data("PAXG-USD", tf, prd)
+    b_df = get_asset_data("BTC-USD", tf, prd)
+    e_df = get_asset_data("ETH-USD", tf, prd)
 
-        # Extract primary data
-        m_df = data[main_t].copy()
-        idx = m_df.index
-        
-        # Align Intermarket Ratios
-        p_c = data["PAXG-USD"]['Close'].reindex(idx).ffill().bfill()
-        b_c = data["BTC-USD"]['Close'].reindex(idx).ffill().bfill()
-        e_c = data["ETH-USD"]['Close'].reindex(idx).ffill().bfill()
+    # 3. Align & Ratio Calculation
+    idx = m_df.index
+    
+    def sync_close(source_df, target_idx):
+        if source_df is not None:
+            return source_df['Close'].reindex(target_idx).ffill().bfill()
+        return pd.Series(np.nan, index=target_idx)
 
-        return m_df, (p_c/b_c), (b_c/e_c), None
-    except Exception as e:
-        return None, None, None, str(e)
+    p_c = sync_close(p_df, idx)
+    b_c = sync_close(b_df, idx)
+    e_c = sync_close(e_df, idx)
 
-# EXECUTE DATA FETCH
-df, pb_ratio, be_ratio, err = fetch_turbo_data(primary_ticker, timeframe, period, st.session_state.refresh_count)
+    return m_df, (p_c / (b_c + 1e-9)), (b_c / (e_c + 1e-9)), None
+
+# RUN FETCH
+df, pb_ratio, be_ratio, err = fetch_all_layers(primary_ticker, timeframe, period, st.session_state.refresh_count)
 
 if err:
+    status_box.error(err)
     st.error(f"📡 Connection Issue: {err}")
 elif df is not None:
-    # LIVE LATENCY MONITOR
+    # --- LIVE INTEGRITY CHECK ---
     last_candle = df.index[-1]
     now_utc = datetime.utcnow()
-    diff_seconds = (now_utc - last_candle.replace(tzinfo=None)).total_seconds()
+    diff_sec = (now_utc - last_candle.replace(tzinfo=None)).total_seconds()
     
     with st.sidebar:
-        st.write(f"**Last Candle (UTC):** {last_candle.strftime('%H:%M:%S')}")
-        if diff_seconds > 180:
-            st.error(f"⚠️ Yahoo Lag: {int(diff_seconds/60)}m")
+        if diff_sec < 120:
+            status_box.success(f"LIVE: {int(diff_sec)}s lag")
         else:
-            st.success(f"✅ Data is Live ({int(diff_seconds)}s lag)")
+            status_box.warning(f"DELAYED: {int(diff_sec/60)}m lag")
+        st.write(f"System UTC: {now_utc.strftime('%H:%M:%S')}")
+        st.write(f"Last Candle: {last_candle.strftime('%H:%M:%S')}")
 
-    # --- MATH SECTION ---
-    # Native EMAs
+    # --- MATH SECTION (Native Pandas) ---
     df['EMA_30'] = df['Close'].ewm(span=ema_fast_val, adjust=False).mean()
     df['EMA_72'] = df['Close'].ewm(span=ema_slow_val, adjust=False).mean()
-    
-    # EMA Divergence Z-Score
     df['Spread'] = df['EMA_30'] - df['EMA_72']
+    
     df['Z_EMA'] = (df['Spread'] - df['Spread'].rolling(z_win_val).mean()) / (df['Spread'].rolling(z_win_val).std() + 1e-9)
 
-    # Intermarket Z-Scores
     def get_z(ser, win):
         return (ser - ser.rolling(win).mean()) / (ser.rolling(win).std() + 1e-9)
     
     df['Z_GOLD_BTC'] = get_z(pb_ratio, z_win_val)
     df['Z_BTC_ETH'] = get_z(be_ratio, z_win_val)
 
-    # REVELATION PHASE (-2 to 2 ORIGINAL SCALE)
+    # --- ORIGINAL REVELATION P/D (-2 to 2) ---
     rng = (df['High'] - df['Low']) + 1e-9
     pd_v = 1.0 - ((2 * df['Close'] - (df['High'] + df['Low'])) / rng)
     u, d = (df['High'] - df['High'].shift(1)), (df['Low'].shift(1) - df['Low'])
     
-    phases, h_vals = [], []
+    h_vals, phases = [], []
     for up, dw, val in zip(u, d, pd_v):
         if up > dw and up > 0:
             phases.append("Dp" if val > 1.0 else "rP")
@@ -122,43 +122,28 @@ elif df is not None:
             phases.append("rD" if val > 1.0 else "Ad")
             h_vals.append(-val)
         else:
-            phases.append("Neutral")
-            h_vals.append(0)
+            phases.append("Neutral"); h_vals.append(0)
     df['H_Val'], df['Phase'] = h_vals, phases
 
-    # --- PLOT SECTION ---
-    st.title(f"⚖️ {primary_ticker} Revelation Engine")
-    fig = make_subplots(
-        rows=5, cols=1, shared_xaxes=True, 
-        vertical_spacing=0.02, 
-        row_heights=[0.35, 0.15, 0.15, 0.15, 0.20],
-        subplot_titles=(f"Price Action ({timeframe})", "Revelation P/D Scale", "EMA 30/72 Z-Score", "Gold/BTC Z-Score", "BTC/Eth Z-Score")
-    )
+    # --- VISUALIZATION ---
+    st.title(f"⚖️ {primary_ticker} Revelation")
+    fig = make_subplots(rows=5, cols=1, shared_xaxes=True, vertical_spacing=0.02, 
+                        row_heights=[0.35, 0.15, 0.15, 0.15, 0.20])
 
-    # Row 1: Candlesticks + EMAs
-    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"), row=1, col=1)
+    fig.add_trace(go.Candlestick(x=df.index, open=df.get('Open', df['Close']), high=df['High'], low=df['Low'], close=df['Close'], name="Price"), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['EMA_30'], line=dict(color='orange', width=1.5), name="EMA 30"), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['EMA_72'], line=dict(color='cyan', width=1.5), name="EMA 72"), row=1, col=1)
-    
-    # Row 2: Original P/D
-    c_map = {"rD":'red', "Ad":'orange', "rP":'lime', "Dp":'green', "Neutral":'gray'}
-    fig.add_trace(go.Bar(x=df.index, y=df['H_Val'], marker_color=[c_map.get(p, 'gray') for p in df['Phase']], name="P/D"), row=2, col=1)
-    
-    # Row 3-5: Z-Scores
+
+    colors = [{"rD":'red', "Ad":'orange', "rP":'lime', "Dp":'green'}.get(p, 'gray') for p in df['Phase']]
+    fig.add_trace(go.Bar(x=df.index, y=df['H_Val'], marker_color=colors, name="P/D"), row=2, col=1)
+
     fig.add_trace(go.Scatter(x=df.index, y=df['Z_EMA'], line=dict(color='yellow'), name="Z-EMA"), row=3, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['Z_GOLD_BTC'], line=dict(color='magenta'), name="Z-Gold"), row=4, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['Z_BTC_ETH'], line=dict(color='deepskyblue'), name="Z-Alts"), row=5, col=1)
 
-    # Reference Lines for Z-Scores
-    for r in [3, 4, 5]:
-        fig.add_hline(y=2.0, line_dash="dash", line_color="white", row=r, col=1, opacity=0.3)
-        fig.add_hline(y=-2.0, line_dash="dash", line_color="white", row=r, col=1, opacity=0.3)
-
-    fig.update_layout(height=1200, template="plotly_dark", xaxis_rangeslider_visible=False, showlegend=False)
+    fig.update_layout(height=1100, template="plotly_dark", xaxis_rangeslider_visible=False, showlegend=False)
     st.plotly_chart(fig, use_container_width=True)
 
     # --- DATA TABLE ---
-    st.subheader("📋 Output Data Table (EMA Values Included)")
-    # Included EMA_30 and EMA_72 in display columns
-    cols = ['Close', 'EMA_30', 'EMA_72', 'H_Val', 'Z_EMA', 'Z_GOLD_BTC', 'Z_BTC_ETH', 'Phase']
-    st.dataframe(df[cols].sort_index(ascending=False).head(100).round(4), use_container_width=True)
+    st.subheader("📋 Data Output (Recent at Top)")
+    st.dataframe(df[['Close', 'EMA_30', 'EMA_72', 'Z_EMA', 'Z_GOLD_BTC', 'Z_BTC_ETH', 'Phase']].sort_index(ascending=False).head(50), use_container_width=True)
