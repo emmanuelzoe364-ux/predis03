@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 # --- INITIAL SETTINGS ---
 warnings.filterwarnings('ignore')
-st.set_page_config(layout="wide", page_title="Revelation Engine: Pro Visual")
+st.set_page_config(layout="wide", page_title="Revelation Engine: Smoothed")
 
 # --- SIDEBAR & REFRESH ---
 if 'refresh_count' not in st.session_state:
@@ -27,6 +27,7 @@ with st.sidebar:
     ema_fast = st.number_input("Fast EMA", value=30)
     ema_slow = st.number_input("Slow EMA", value=72)
     z_win = st.number_input("Z-Score Window", value=20)
+    smooth_period = st.number_input("Z-Smoothing Period", value=30) # User requested 30
 
     if st.button("🔄 FORCE SYNC & REFRESH"):
         st.cache_data.clear()
@@ -35,10 +36,9 @@ with st.sidebar:
 
 # --- HIGH-QUALITY YAHOO DATA ENGINE ---
 def fetch_yahoo_direct(ticker, interval, range_str):
-    """Fetches high-quality aggregated data directly from Yahoo servers."""
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval={interval}&range={range_str}"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/110.0.0.0'}
+        headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, headers=headers, timeout=10)
         data = response.json()['chart']['result'][0]
         
@@ -81,6 +81,7 @@ else:
     pb_ratio, be_ratio = p_c / (b_c + 1e-9), b_c / (e_c + 1e-9)
 
     # --- CALCULATIONS ---
+    # 1. EMAs
     main_df['EMA_30'] = main_df['Close'].ewm(span=ema_fast, adjust=False).mean()
     main_df['EMA_72'] = main_df['Close'].ewm(span=ema_slow, adjust=False).mean()
     main_df['Spread'] = main_df['EMA_30'] - main_df['EMA_72']
@@ -88,11 +89,18 @@ else:
     def get_z(ser, win):
         return (ser - ser.rolling(win).mean()) / (ser.rolling(win).std() + 1e-9)
     
+    # 2. Raw EMA Z-Score (Kept raw for precision)
     main_df['Z_EMA'] = get_z(main_df['Spread'], z_win)
-    main_df['Z_GOLD_BTC'] = get_z(pb_ratio, z_win)
-    main_df['Z_BTC_ETH'] = get_z(be_ratio, z_win)
+    
+    # 3. Smoothed Inter-market Z-Scores
+    # We calculate the Z-score first, then apply the 30 EMA smoothing
+    z_gold_raw = get_z(pb_ratio, z_win)
+    main_df['Z_GOLD_BTC'] = z_gold_raw.ewm(span=smooth_period, adjust=False).mean()
+    
+    z_eth_raw = get_z(be_ratio, z_win)
+    main_df['Z_BTC_ETH'] = z_eth_raw.ewm(span=smooth_period, adjust=False).mean()
 
-    # Revelation P/D logic
+    # 4. Revelation P/D logic
     rng = (main_df['High'] - main_df['Low']) + 1e-9
     pd_v = 1.0 - ((2 * main_df['Close'] - (main_df['High'] + main_df['Low'])) / rng)
     u, d = (main_df['High'] - main_df['High'].shift(1)), (main_df['Low'].shift(1) - main_df['Low'])
@@ -104,35 +112,40 @@ else:
         else: phases.append("Neutral"); h_vals.append(0)
     main_df['H_Val'], main_df['Phase'] = h_vals, phases
 
-    # --- PLOTTING (DEEP VISUALS) ---
+    # --- PLOTTING ---
     st.title(f"⚖️ Revelation Engine: {primary_ticker}")
     
     fig = make_subplots(
         rows=5, cols=1, shared_xaxes=True, vertical_spacing=0.03, 
         row_heights=[0.35, 0.12, 0.16, 0.16, 0.16],
-        subplot_titles=("1. Price Action (Deep Aggregation)", "2. Revelation P/D Scale", "3. EMA Divergence Z-Score", "4. GOLD/BTC Z-Score", "5. BTC/ETH Z-Score")
+        subplot_titles=(
+            "1. Price Action", 
+            "2. Revelation P/D Scale", 
+            "3. EMA Divergence Z-Score (Raw)", 
+            f"4. GOLD/BTC Z-Score ({smooth_period} EMA Smooth)", 
+            f"5. BTC/ETH Z-Score ({smooth_period} EMA Smooth)"
+        )
     )
 
-    # High-Visibility Candlesticks
+    # Candlesticks
     fig.add_trace(go.Candlestick(
         x=main_df.index, open=main_df['Open'], high=main_df['High'], low=main_df['Low'], close=main_df['Close'], 
-        name="Market Price",
-        increasing_line_color='#26a69a', decreasing_line_color='#ef5350',
-        increasing_fillcolor='#26a69a', decreasing_fillcolor='#ef5350',
-        line_width=1.5 # Strong, deep lines
+        name="Market Price", increasing_line_color='#26a69a', decreasing_line_color='#ef5350', line_width=1.5
     ), row=1, col=1)
 
     fig.add_trace(go.Scatter(x=main_df.index, y=main_df['EMA_30'], line=dict(color='orange', width=2), name="EMA 30"), row=1, col=1)
     fig.add_trace(go.Scatter(x=main_df.index, y=main_df['EMA_72'], line=dict(color='cyan', width=2), name="EMA 72"), row=1, col=1)
 
-    # Revelation Bars
+    # Revelation
     c_map = {"rD":'#FF0000', "Ad":'#FFA500', "rP":'#00FF00', "Dp":'#006400', "Neutral":'#808080'}
     fig.add_trace(go.Bar(x=main_df.index, y=main_df['H_Val'], marker_color=[c_map.get(p, 'gray') for p in main_df['Phase']], name="P/D Intensity"), row=2, col=1)
 
-    # Z-Scores
-    fig.add_trace(go.Scatter(x=main_df.index, y=main_df['Z_EMA'], line=dict(color='#FFFF00', width=2.5), name="Z-EMA"), row=3, col=1)
-    fig.add_trace(go.Scatter(x=main_df.index, y=main_df['Z_GOLD_BTC'], line=dict(color='#FF00FF', width=2.5), name="Z-Gold"), row=4, col=1)
-    fig.add_trace(go.Scatter(x=main_df.index, y=main_df['Z_BTC_ETH'], line=dict(color='#00BFFF', width=2.5), name="Z-Alts"), row=5, col=1)
+    # Subplot 3: Raw Z-EMA
+    fig.add_trace(go.Scatter(x=main_df.index, y=main_df['Z_EMA'], line=dict(color='#FFFF00', width=2), name="Z-EMA (Raw)"), row=3, col=1)
+    
+    # Subplots 4 & 5: Smoothed Z-Scores
+    fig.add_trace(go.Scatter(x=main_df.index, y=main_df['Z_GOLD_BTC'], line=dict(color='#FF00FF', width=2.5), name="Z-Gold (Smoothed)"), row=4, col=1)
+    fig.add_trace(go.Scatter(x=main_df.index, y=main_df['Z_BTC_ETH'], line=dict(color='#00BFFF', width=2.5), name="Z-Alts (Smoothed)"), row=5, col=1)
 
     # Reference Lines
     for r in [3, 4, 5]:
@@ -144,6 +157,6 @@ else:
     st.plotly_chart(fig, use_container_width=True)
 
     # --- DATA TABLE ---
-    st.subheader("📋 Output Data Table (Institutional Feed)")
+    st.subheader("📋 Output Data Table (Smoothed Stats)")
     cols = ['Close', 'EMA_30', 'EMA_72', 'H_Val', 'Z_EMA', 'Z_GOLD_BTC', 'Z_BTC_ETH', 'Phase']
     st.dataframe(main_df[cols].sort_index(ascending=False).head(100).round(4), use_container_width=True)
