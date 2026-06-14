@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 # --- INITIAL SETTINGS ---
 warnings.filterwarnings('ignore')
-st.set_page_config(layout="wide", page_title="Revelation Engine: High-Sensitivity")
+st.set_page_config(layout="wide", page_title="Revelation Engine: Multi-Smooth")
 
 # --- SIDEBAR & REFRESH ---
 if 'refresh_count' not in st.session_state:
@@ -24,11 +24,18 @@ with st.sidebar:
     lookback = st.selectbox("Data Lookback", ["1d", "3d", "7d", "1mo"], index=2)
     
     st.divider()
+    st.subheader("Statistical Parameters")
     ema_fast = st.number_input("Fast EMA", value=30)
     ema_slow = st.number_input("Slow EMA", value=72)
     z_win = st.number_input("Z-Score Window", value=20)
-    # NEW DEFAULT: 3 Period Smoothing
-    smooth_period = st.number_input("Global Smoothing Period", value=3) 
+    
+    st.divider()
+    st.subheader("🎚️ Smoothing Controls")
+    # Global smoothing for EMA, Gold, and Alts
+    smooth_period = st.number_input("Global Smoothing (Layers 3,4,5)", value=3) 
+    
+    # INDIVIDUAL CONTROL for USDT/BTC
+    usdt_smooth_period = st.number_input("USDT/BTC Smoothing ONLY", value=3)
 
     if st.button("🔄 FORCE SYNC & REFRESH"):
         st.cache_data.clear()
@@ -89,11 +96,13 @@ else:
         raw_z = (series - series.rolling(win).mean()) / (series.rolling(win).std() + 1e-9)
         return raw_z.ewm(span=smooth, adjust=False).mean()
     
-    # Apply 3-Period Smoothing globally
+    # 1. Global Smooth (EMA, Gold, Alts)
     main_df['Z_EMA'] = get_z_smoothed(main_df['Spread'], z_win, smooth_period)
     main_df['Z_GOLD_BTC'] = get_z_smoothed(pb_ratio, z_win, smooth_period)
     main_df['Z_BTC_ETH'] = get_z_smoothed(be_ratio, z_win, smooth_period)
-    main_df['Z_DOMINANCE'] = get_z_smoothed(ub_ratio, z_win, smooth_period)
+    
+    # 2. SPECIFIC SMOOTH for USDT/BTC
+    main_df['Z_DOMINANCE'] = get_z_smoothed(ub_ratio, z_win, usdt_smooth_period)
 
     # Revelation P/D logic
     rng = (main_df['High'] - main_df['Low']) + 1e-9
@@ -106,7 +115,7 @@ else:
         else: phases.append("Neutral"); h_vals.append(0)
     main_df['H_Val'], main_df['Phase'] = h_vals, phases
 
-    # --- PLOTTING ---
+    # --- PLOTTING (WHITE THEME) ---
     st.markdown("<h1 style='text-align: center; color: black;'>⚖️ Revelation Engine Pro</h1>", unsafe_allow_html=True)
     
     fig = make_subplots(
@@ -115,30 +124,27 @@ else:
         subplot_titles=(
             "1. Market Price & EMAs", "2. Revelation P/D Scale", 
             f"3. EMA Divergence Z ({smooth_period}S)", f"4. Gold / BTC Z ({smooth_period}S)", 
-            f"5. BTC / ETH Z ({smooth_period}S)", f"6. USDT / BTC Dominance Z ({smooth_period}S)"
+            f"5. BTC / ETH Z ({smooth_period}S)", f"6. USDT / BTC Dominance Z ({usdt_smooth_period}S)"
         )
     )
 
-    # 1. Price
+    # Subplots 1 & 2
     fig.add_trace(go.Candlestick(x=main_df.index, open=main_df['Open'], high=main_df['High'], low=main_df['Low'], close=main_df['Close'], name="Price", increasing_line_color='#26a69a', decreasing_line_color='#ef5350'), row=1, col=1)
     fig.add_trace(go.Scatter(x=main_df.index, y=main_df['EMA_30'], line=dict(color='#FF8C00', width=2), name="EMA 30"), row=1, col=1)
     fig.add_trace(go.Scatter(x=main_df.index, y=main_df['EMA_72'], line=dict(color='#0000FF', width=2), name="EMA 72"), row=1, col=1)
-
-    # 2. P/D Scale
     c_map = {"rD":'#FF0000', "Ad":'#FFA500', "rP":'#00FF00', "Dp":'#006400', "Neutral":'#D3D3D3'}
     fig.add_trace(go.Bar(x=main_df.index, y=main_df['H_Val'], marker_color=[c_map.get(p, '#D3D3D3') for p in main_df['Phase']], name="P/D"), row=2, col=1)
 
-    # 3-6. Z-Scores
+    # Z-Scores
     fig.add_trace(go.Scatter(x=main_df.index, y=main_df['Z_EMA'], line=dict(color='#D35400', width=2), name="Z-EMA"), row=3, col=1)
     fig.add_trace(go.Scatter(x=main_df.index, y=main_df['Z_GOLD_BTC'], line=dict(color='#C0392B', width=2), name="Z-Gold"), row=4, col=1)
     fig.add_trace(go.Scatter(x=main_df.index, y=main_df['Z_BTC_ETH'], line=dict(color='#2980B9', width=2), name="Z-Alts"), row=5, col=1)
+    # The Black Line (USDT)
     fig.add_trace(go.Scatter(x=main_df.index, y=main_df['Z_DOMINANCE'], line=dict(color='#000000', width=2.5), name="Z-USDT (Black)"), row=6, col=1)
 
-    # Reference Lines Loop
+    # Reference Lines
     for r in [3, 4, 5, 6]:
-        # CUSTOM LOGIC: BTC/ETH (Row 5) uses 1.8, others use 2.0
         threshold = 1.8 if r == 5 else 2.0
-        
         fig.add_hline(y=threshold, line_dash="dash", line_color="black", row=r, col=1, opacity=0.4)
         fig.add_hline(y=-threshold, line_dash="dash", line_color="black", row=r, col=1, opacity=0.4)
         fig.add_hline(y=0, line_width=1, line_color="black", row=r, col=1, opacity=0.2)
@@ -147,6 +153,6 @@ else:
     st.plotly_chart(fig, use_container_width=True)
 
     # --- DATA TABLE ---
-    st.subheader("📋 Output Data Stream (Fast Smoothing)")
+    st.subheader("📋 Output Data Stream")
     cols = ['Close', 'EMA_30', 'EMA_72', 'H_Val', 'Z_EMA', 'Z_GOLD_BTC', 'Z_BTC_ETH', 'Z_DOMINANCE', 'Phase']
     st.dataframe(main_df[cols].sort_index(ascending=False).head(100).round(4), use_container_width=True)
