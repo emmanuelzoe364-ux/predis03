@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 # --- INITIAL SETTINGS ---
 warnings.filterwarnings('ignore')
-st.set_page_config(layout="wide", page_title="Revelation Engine: Professional")
+st.set_page_config(layout="wide", page_title="Revelation Engine Professional")
 
 # --- SIDEBAR & REFRESH ---
 if 'refresh_count' not in st.session_state:
@@ -20,7 +20,9 @@ if 'refresh_count' not in st.session_state:
 with st.sidebar:
     st.header("⚙️ Engine Configuration")
     primary_ticker = st.text_input("Ticker", value="BTC-USD").strip().upper()
-    timeframe = st.selectbox("Interval", ["1m", "5m", "15m", "1h", "1d"], index=1) 
+    
+    # ADDED 30m TO THE LIST
+    timeframe = st.selectbox("Interval", ["1m", "5m", "15m", "30m", "1h", "1d"], index=1) 
     lookback = st.selectbox("Data Lookback", ["1d", "3d", "7d", "1mo"], index=2)
     
     st.divider()
@@ -101,14 +103,15 @@ else:
     pd_v = 1.0 - ((2 * main_df['Close'] - (main_df['High'] + main_df['Low'])) / rng)
     u, d = (main_df['High'] - main_df['High'].shift(1)), (main_df['Low'].shift(1) - main_df['Low'])
     h_vals, phases = [], []
-    for up_m, dw_m, val in zip(u, d, pd_v):
-        if up_m > dw_m and up_m > 0: phases.append("Dp" if val > 1.0 else "rP"); h_vals.append(val)
-        elif dw_m > up_m and dw_m > 0: phases.append("rD" if val > 1.0 else "Ad"); h_vals.append(-val)
+    for up, dw, val in zip(u, d, pd_v):
+        if up > dw and up > 0: phases.append("Dp" if val > 1.0 else "rP"); h_vals.append(val)
+        elif dw > up and dw > 0: phases.append("rD" if val > 1.0 else "Ad"); h_vals.append(-val)
         else: phases.append("Neutral"); h_vals.append(0)
     main_df['H_Val'], main_df['Phase'] = h_vals, phases
 
-    # --- THE "IRON-CLAD" TIME FILTER (Exclude Live/Ongoing Candle) ---
+    # --- THE "IRON-CLAD" TIME FILTER ---
     now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    # Updated freq_map to include 30m
     freq_map = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "1d": 1440}
     main_df = main_df[main_df.index + pd.Timedelta(minutes=freq_map.get(timeframe, 1)) <= now_utc]
 
@@ -155,4 +158,4 @@ else:
         cols = ['Close', 'EMA_30', 'EMA_72', 'H_Val', 'Z_EMA', 'Z_GOLD_BTC', 'Z_BTC_ETH', 'Z_USDT', 'Z_VIX', 'Phase']
         st.dataframe(main_df[cols].sort_index(ascending=False).head(100).round(4), use_container_width=True)
     else:
-        st.warning("Filtering ongoing data. Please wait for the next candle to close...")
+        st.warning("Filtering ongoing data. Please wait for the 30-minute candle to close...")
