@@ -109,7 +109,7 @@ else:
 
     # --- THE "IRON-CLAD" TIME FILTER (Exclude Live/Ongoing Candle) ---
     now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-    freq_map = {"1m": 1, "5m": 5, "15m","30m": 15, "1h": 60, "1d": 1440}
+    freq_map = {"1m": 1, "5m": 5, "15m": 15,"30m": 30, "1h": 60, "1d": 1440}
     main_df = main_df[main_df.index + pd.Timedelta(minutes=freq_map.get(timeframe, 1)) <= now_utc]
 
     # --- VISUALS ---
