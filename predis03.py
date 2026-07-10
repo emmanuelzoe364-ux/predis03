@@ -156,6 +156,6 @@ else:
         # --- DATA TABLE ---
         st.subheader("📋 Output Data Stream (Confirmed Values Only)")
         cols = ['Close', 'EMA_30', 'EMA_72', 'H_Val', 'Z_EMA', 'Z_GOLD_BTC', 'Z_BTC_ETH', 'Z_USDT', 'Z_VIX', 'Phase']
-        st.dataframe(main_df[cols].sort_index(ascending=False).head(100).round(4), use_container_width=True)
+        st.dataframe(main_df[cols].sort_index(ascending=False).head(1000).round(4), use_container_width=True)
     else:
         st.warning("Filtering ongoing data. Please wait for the 30-minute candle to close...")
