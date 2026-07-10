@@ -23,7 +23,7 @@ with st.sidebar:
     
     # ADDED 30m TO THE LIST
     timeframe = st.selectbox("Interval", ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1mo"], index=1) 
-    lookback = st.selectbox("Data Lookback", ["1d", "3d", "7d", "1mo", "3mo", "5y"], index=2)
+    lookback = st.selectbox("Data Lookback", ["1d", "3d", "7d", "1mo", "3mo", "10y"], index=2)
     
     st.divider()
     st.subheader("EMA & Stats Settings")
