@@ -23,7 +23,7 @@ with st.sidebar:
     
     # ADDED 30m TO THE LIST
     timeframe = st.selectbox("Interval", ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1mo"], index=1) 
-    lookback = st.selectbox("Data Lookback", ["1d", "3d", "7d", "1mo", "3mo", "5yr"], index=2)
+    lookback = st.selectbox("Data Lookback", ["1d", "3d", "7d", "1mo", "3mo", "5y"], index=2)
     
     st.divider()
     st.subheader("EMA & Stats Settings")
@@ -112,7 +112,7 @@ else:
     # --- THE "IRON-CLAD" TIME FILTER ---
     now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
     # Updated freq_map to include 30m
-    freq_map = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
+    freq_map = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440, "1mo": 43800}
     main_df = main_df[main_df.index + pd.Timedelta(minutes=freq_map.get(timeframe, 1)) <= now_utc]
 
     # --- VISUALS ---
